@@ -5,14 +5,13 @@ on:
 
 jobs:
   secure-rdp:
-    runs-on: windows-latest
+    runs-on: windows-2022   # ⬅️ pinned to Windows Server 2022
     timeout-minutes: 3600
 
     steps:
       - name: Configure Core RDP Settings
         shell: powershell
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
@@ -20,29 +19,22 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
 
-          # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "No existing rule to delete"
-          
-          # For testing, allow incoming connections on port 3389 (RDP)
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
-          # Restart the Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Secure Password
         shell: powershell
-        env:
-          # ensure this step has no pre-existing sensitive env
-          GITHUB_ENV: ${{ github.env.GITHUB_ENV }}
         run: |
           Add-Type -AssemblyName System.Security
           $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
               Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
+                         [char[]](91..96) + [char[]](123..126))
           }
           $rawPassword = @()
           $rawPassword += $charSet.Upper | Get-Random -Count 4
@@ -52,7 +44,6 @@ jobs:
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Remove user if it exists (idempotency)
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
             Remove-LocalUser -Name "RDP"
           }
@@ -66,7 +57,6 @@ jobs:
               exit 1
           }
 
-          # Mask the password in logs and expose minimal info to subsequent steps
           Write-Host "::add-mask::$password"
           echo "RDP_USERNAME=RDP" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
@@ -77,11 +67,8 @@ jobs:
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = Join-Path -Path $env:TEMP -ChildPath "tailscale.msi"
 
-          Write-Host "Downloading Tailscale from $tsUrl to $installerPath"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
           
-          # Use Start-Process with properly quoted argument for msiexec.
-          # Provide each argument as its own string; ensure the MSI path is quoted as a single argument.
           $msiArg = "`"$installerPath`""
           Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", $msiArg, "/quiet", "/norestart" -Wait -NoNewWindow
           if ($LASTEXITCODE -ne 0) {
@@ -98,41 +85,28 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           if (-not $env:TAILSCALE_AUTH_KEY) {
-            Write-Error "TAILSCALE_AUTH_KEY secret is not set. Please set secrets.TAILSCALE_AUTH_KEY"
+            Write-Error "TAILSCALE_AUTH_KEY secret is not set."
             exit 1
           }
 
           $tsExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsExe)) {
-            Write-Error "Tailscale executable not found at $tsExe"
-            exit 1
-          }
-
-          # Compose hostname using the run id
           $hostname = "gh-runner-$($env:GITHUB_RUN_ID)"
 
-          # Bring up Tailscale
           & $tsExe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=$hostname
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to bring up Tailscale (exit $LASTEXITCODE)"
-            exit 1
-          }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
-          # Wait for a Tailscale IPv4 address
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 30) {
               Start-Sleep -Seconds 5
               $out = & $tsExe ip -4
-              # ip -4 may return multiple lines; pick first IPv4-like token
               $ipCandidate = ($out -split "\s+|" | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -First 1)
               if ($ipCandidate) { $tsIP = $ipCandidate }
               $retries++
           }
 
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned after waiting. Output of 'tailscale ip -4':"
-              & $tsExe ip -4
+              Write-Error "Tailscale IP not assigned"
               exit 1
           }
 
@@ -142,40 +116,25 @@ jobs:
       - name: Verify RDP Accessibility
         shell: powershell
         run: |
-          if (-not $env:TAILSCALE_IP) {
-            Write-Error "TAILSCALE_IP not set in environment"
-            exit 1
-          }
-
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
 
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
           if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed (Target: $env:TAILSCALE_IP)"
-              # Show useful diagnostics
-              Write-Host "Netstat (listening ports):"
-              netstat -ano | Select-String "3389"
+              Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Connection (keep runner alive)
+      - name: Maintain Connection
         shell: powershell
-        env:
-          RDP_USERNAME: ${{ env.RDP_USERNAME }}
-          RDP_PASSWORD: ${{ env.RDP_PASSWORD }}
-          TAILSCALE_IP: ${{ env.TAILSCALE_IP }}
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USERNAME"
-          # Password is masked above with ::add-mask::, safe to echo minimally (but still masked)
           Write-Host "Password: [masked]"
           Write-Host "==================`n"
 
-          # Keep runner active until the job is cancelled (useful for RDP access)
           while ($true) {
-              Write-Host "[$(Get-Date -Format o)] RDP Active - use Cancel workflow run to terminate"
+              Write-Host "[$(Get-Date -Format o)] RDP Active - cancel workflow to terminate"
               Start-Sleep -Seconds 300
           }
