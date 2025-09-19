@@ -5,13 +5,14 @@ on:
 
 jobs:
   secure-rdp:
-    runs-on: windows-2022   # ⬅️ pinned to Windows Server 2022
+    runs-on: windows-2022   # pinned to Windows Server 2022
     timeout-minutes: 3600
 
     steps:
       - name: Configure Core RDP Settings
         shell: powershell
         run: |
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
@@ -19,7 +20,10 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
 
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "No existing rule to delete"
+          # Safely remove existing firewall rule (no error if it doesn't exist)
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+
+          # Allow incoming connections on port 3389 (RDP)
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
