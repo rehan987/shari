@@ -61,6 +61,7 @@ jobs:
               exit 1
           }
 
+          # Mask password in logs
           Write-Host "::add-mask::$password"
           echo "RDP_USERNAME=RDP" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
